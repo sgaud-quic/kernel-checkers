@@ -20,9 +20,9 @@ enter_kernel_dir
 
 # Initialize variables
 exit_status=0
-log_summary=()
-dt_dir="arch/arm64/boot/dts"
-log_file="dtbs_errors.log"
+dt_dir="arch/arm64/boot/dts/"
+base_log_file="base_dtbs_errors.log"
+head_log_file="head_dtbs_errors.log"
 temp_out="temp-out"
 
 # Check for devicetree changes
@@ -33,47 +33,69 @@ if ! git diff --name-only "$base_sha" "$head_sha" -- "$dt_dir" | grep -q .; then
 fi
 
 # Build DTBs at base SHA
-git checkout $base_sha > /dev/null 2>&1
-run_in_kmake_image make -s -j$(nproc) O="$temp_out" defconfig
-run_in_kmake_image make -s -j$(nproc) O="$temp_out" dtbs
+git checkout "$base_sha" > /dev/null 2>&1
+run_in_kmake_image make -s -j"$(nproc)" O="$temp_out" defconfig
+run_in_kmake_image make -s -j"$(nproc)" O="$temp_out" dtbs
 
 # Checkout to head SHA and run make dtbs to
 # get the list of devicetree files impacted
 # by the head_sha
-git checkout $head_sha > /dev/null 2>&1
-run_in_kmake_image make -s -j$(nproc) O="$temp_out" defconfig
-dtb_files=$(run_in_kmake_image make -j$(nproc) O=temp-out dtbs | grep -oP 'arch/arm64/boot/dts/.*?\.dtb')
+git checkout "$head_sha" > /dev/null 2>&1
+run_in_kmake_image make -s -j"$(nproc)" O="$temp_out" defconfig
 
-# Get the nodes modified by PR
-modified_nodes=$(git diff "$base_sha".."$head_sha" -- "$dt_dir" | \
-                   grep -oE '[a-zA-Z0-9_-]+@[0-9a-fA-F]+' || true | sort -u | uniq)
+# Collect DTB paths from the build output
+dtb_files=$(
+  run_in_kmake_image make -j"$(nproc)" O="$temp_out" dtbs \
+  | grep -oP 'arch/arm64/boot/dts/.*?\.dtb' \
+  | sort -u
+)
 
-# Validate each DTB file
+if [[ -z "$dtb_files" ]]; then
+    echo "No DTBs were built under head; nothing to validate."
+    # Cleanup
+    rm -rf "$temp_out"
+    leave_kernel_dir
+    exit 0
+fi
+
+git checkout "$base_sha" > /dev/null 2>&1
+run_in_kmake_image make -s -j"$(nproc)" O="$temp_out" defconfig
+
 for devicetree in $dtb_files; do
-    echo "Validating $devicetree"
-    run_in_kmake_image make -j"$(nproc)" O="$temp_out" CHECK_DTBS=y "$(echo "$devicetree" | sed 's|^arch/arm64/boot/dts/||')" |& tee "$log_file"
+    target="$(echo "$devicetree" | sed 's|^arch/arm64/boot/dts/||')"
 
-    # Extract error node names from the log file
-    error_nodes=$(grep -oP '[a-zA-Z0-9_-]+@[0-9a-fA-F]+' "$log_file" || true | sort -u | uniq)
-
-    # Compare modified nodes with error nodes
-    common_nodes=$(comm -12 <(printf "%s\n" "$modified_nodes" | sort ) <(printf "%s\n" "$error_nodes" | sort ))
-    if [[ -n "$common_nodes" ]]; then
-        log_summary+="dtbs_check failed for $devicetree...\n"
-        exit_status=1
-    else
-        log_summary+="dtbs_check passed for $devicetree...\n"
-    fi
-    echo ""
+    run_in_kmake_image \
+      make  -j"$(nproc)" O="$temp_out" CHECK_DTBS=y \
+      "$target"  >> "$base_log_file" 2>&1
 done
 
-# Cleanup
-rm -f $log_file
-rm -rf "$temp_out"
-leave_kernel_dir
+git checkout "$head_sha" > /dev/null 2>&1
+run_in_kmake_image make -s -j"$(nproc)" O="$temp_out" defconfig
 
-# Print summary
-echo ""
-echo -e "Log Summary:\n$log_summary"
+for devicetree in $dtb_files; do
+    echo "Validating $devicetree"
+
+    target="$(echo "$devicetree" | sed 's|^arch/arm64/boot/dts/||')"
+
+    run_in_kmake_image \
+      make  -j"$(nproc)" O="$temp_out" CHECK_DTBS=y \
+      "$target"  >> "$head_log_file" 2>&1
+done
+
+log_summary=$(grep -vFf "$base_log_file" "$head_log_file")
+
+# If log_summary is non-empty, set exit_status=1
+if [ -n "$log_summary" ]; then
+    echo -e "Log Summary: Test failed\n$log_summary"
+    exit_status=1
+else
+    echo -e "Log Summary: Test passed"
+fi
+
+# Cleanup
+rm -rf "$temp_out"
+rm -f "$base_log_file"
+rm -f "$head_log_file"
+leave_kernel_dir
 
 exit $exit_status
