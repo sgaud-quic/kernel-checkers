@@ -1,4 +1,5 @@
 name: Sync workspace
+description: Sync the workspace with the latest changes from the base branch and the PR
 
 inputs:
   base_branch:
@@ -13,22 +14,25 @@ inputs:
     required: false
     default: qualcomm-linux/kernel-topics
 
+outputs:
+  base_sha:
+    description: Base sha of the PR
+    value: ${{ steps.get_sha.outputs.base_sha }}
+  head_sha:
+    description: Head sha of the PR
+    value: ${{ steps.get_sha.outputs.head_sha }}
+  kernel_src:
+    description: Path to the kernel source directory
+    value: ${{ steps.get_sha.outputs.kernel_src }}
+
 runs:
   using: "composite"
   steps:
-    - name: Print inputs
-      shell: bash
-      run: |
-        echo ${{ inputs.base_branch }}
-        echo ${{ inputs.pr_number }}
-
     - name: Checkout PR branch
-      if: inputs.topic_repo == 'qualcomm-linux/kernel'
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
         repository: qualcomm-linux/kernel
-        ref: ${{ inputs.base_branch }}
+        path: kernel
 
     - name: Configure git
       shell: bash
@@ -37,57 +41,107 @@ runs:
         git config --global user.email "github-actions@github.com"
 
     - name: Sync with latest changes
-      if: inputs.topic_repo == 'qualcomm-linux/kernel'
       shell: bash
+      id: get_sha
       run: |
-        echo "Syncing with latest changes..."
-        git fetch origin ${{ inputs.base_branch }}
-        git merge origin/${{ inputs.base_branch }}
+        set -euo pipefail
 
-    - name: Clone repositories
-      if: inputs.topic_repo == 'qualcomm-linux/kernel-topics'
-      shell: bash
-      run: |
-        git clone https://github.com/qualcomm-linux/kernel.git
-        git clone https://github.com/qualcomm-linux/automerge.git
+        BASE="${{ inputs.base_branch }}"
+        PR="${{ inputs.pr_number }}"
+        TOPIC_REPO="${{ inputs.topic_repo }}"
 
-    - name: Create merge configuration
-      if: inputs.topic_repo == 'qualcomm-linux/kernel-topics'
-      shell: bash
-      run: |
-        TOPIC_BRANCH=${{ inputs.base_branch }}
-        TOPIC_REPO=${{ inputs.topic_repo }}
-        cat <<EOF > merge.conf
-        baseline https://github.com/qualcomm-linux/kernel.git qcom-next
-        topic https://github.com/$TOPIC_REPO.git $TOPIC_BRANCH
-        EOF
-        echo "File 'merge.conf' created successfully."
+        # helper to fetch & merge a PR robustly
+        merge_pr() {
+          local pr="$1"
+          local remote="$2"    # full remote URL
+          local ref="pr-${pr}"
 
-    - name: Run auto merge
-      if: inputs.topic_repo == 'qualcomm-linux/kernel-topics'
-      shell: bash
-      run: |
+          echo "Fetching PR #${pr} from ${remote}..."
+          if ! git fetch "${remote}" "pull/${pr}/head:${ref}"; then
+            echo "Error: git fetch failed for PR #${pr}" >&2
+            return 2
+          fi
+
+          echo "Merging ${ref} (no-commit)..."
+          if ! git merge "${ref}" --no-commit; then
+            echo "Merge failed or conflicts detected. Aborting merge." >&2
+            git merge --abort || true
+            return 3
+          fi
+
+          if ! git diff --cached --quiet; then
+            if ! git commit -m "Merged PR #${pr}"; then
+              echo "Error: git commit failed" >&2
+              return 4
+            fi
+          else
+            echo "Nothing to commit. PR may already be merged or fast-forwarded."
+          fi
+
+          return 0
+        }
+
+        # work inside checked-out kernel tree
         cd kernel
-        ../automerge/ci-merge -f ../merge.conf -t head -n
 
-    - name: Fetch PR
-      if: inputs.topic_repo == 'qualcomm-linux/kernel-topics'
-      shell: bash
-      run: |
-        cd kernel
-        git fetch https://github.com/${{inputs.topic_repo}}.git pull/${{inputs.pr_number}}/head:pr-${{inputs.pr_number}}
-        git merge pr-${{inputs.pr_number}} --no-commit
-        git commit -m "Merged PR ${{inputs.pr_number}}"
-    
-    - name: Fetch PR
-      if: inputs.topic_repo == 'qualcomm-linux/kernel'
-      shell: bash
-      run: |
-        git checkout ${{ inputs.base_branch }}
-        git fetch https://github.com/qualcomm-linux/kernel.git pull/${{inputs.pr_number}}/head:pr-${{inputs.pr_number}}
-        git merge pr-${{ inputs.pr_number }} --no-commit || echo "Merge already applied or fast-forwarded"
-        if ! git diff --cached --quiet; then
-          git commit -m "Merged PR #${{ inputs.pr_number }}"
+        if [ "$TOPIC_REPO" = "qualcomm-linux/kernel" ]; then
+          echo "Syncing $BASE baseline..."
+          git fetch origin "$BASE" --quiet
+          git checkout "$BASE"
+          git reset --hard origin/"$BASE"
+
+          # base sha = tip before applying PR
+          base_sha=$(git rev-parse --verify HEAD)
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$PR" ]; then
+            merge_pr "$PR" "https://github.com/qualcomm-linux/kernel.git" || exit $?
+          else
+            echo "No PR number provided; skipping PR fetch/merge."
+          fi
         else
-          echo "Nothing to commit. PR may already be merged or fast-forwarded."
+          # non-qcom-next-staging path: run automerge then merge PR
+          echo "Syncing qcom-next baseline..."
+          git fetch origin qcom-next --quiet
+          git checkout qcom-next
+          git reset --hard origin/qcom-next
+
+          # base sha = tip before applying PR
+          base_sha=$(git rev-parse --verify HEAD)
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+          cd ..
+          if [ ! -d "automerge" ]; then
+            git clone https://github.com/qualcomm-linux/automerge.git automerge || {
+              echo "automerge clone failed" >&2
+              exit 5
+            }
+          fi
+
+          TOPIC_BRANCH="$BASE"
+          printf '%s\n' \
+            "baseline https://github.com/qualcomm-linux/kernel.git qcom-next" \
+            "topic https://github.com/${TOPIC_REPO}.git ${TOPIC_BRANCH}" \
+            > merge.conf
+
+          echo "File '../merge.conf' created successfully."
+
+          echo "Running automerge..."
+          cd kernel
+          ../automerge/ci-merge -f ../merge.conf -t head -n || {
+            echo "automerge returned non-zero; check logs for conflicts" >&2
+            exit 1
+          }
+
+          if [ -n "$PR" ]; then
+            REMOTE="https://github.com/${TOPIC_REPO}.git"
+            merge_pr "$PR" "$REMOTE" || exit $?
+          else
+            echo "No PR number provided; skipping PR fetch/merge."
+          fi
         fi
+
+        # head sha after PR merge
+        head_sha=$(git rev-parse --verify HEAD)
+        echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+        echo "kernel_src=$(pwd)" >> "$GITHUB_OUTPUT"

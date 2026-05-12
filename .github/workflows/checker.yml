@@ -5,15 +5,6 @@ on:
       check_name:
         required: true
         type: string
-      kernel_src:
-        required: true
-        type: string
-      base_sha:
-        required: true
-        type: string
-      head_sha:
-        required: true
-        type: string
       base_branch:
         required: false
         type: string
@@ -42,6 +33,7 @@ jobs:
           echo "Docker Image Pulled Successfully"
 
       - name: Checkout code
+        id: sync
         uses: qualcomm-linux/kernel-checkers/.github/actions/sync@main
         with:
           base_branch: ${{ inputs.base_branch }}
@@ -53,5 +45,5 @@ jobs:
 
       - name: Run kernel check
         run: |
-          bash ../kernel-checkers/${{ inputs.check_name }}.sh --kernel-src ${{ inputs.kernel_src }} \
-          --base ${{ inputs.base_sha }} --head ${{ inputs.head_sha }}
+          bash ../kernel-checkers/${{ inputs.check_name }}.sh --kernel-src ${{ steps.sync.outputs.kernel_src }} \
+          --base ${{ steps.sync.outputs.base_sha }} --head ${{ steps.sync.outputs.head_sha }}
