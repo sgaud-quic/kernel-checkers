@@ -106,10 +106,6 @@ runs:
           git checkout qcom-next
           git reset --hard origin/qcom-next
 
-          # base sha = tip before applying PR
-          base_sha=$(git rev-parse --verify HEAD)
-          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-
           cd ..
           if [ ! -d "automerge" ]; then
             git clone https://github.com/qualcomm-linux/automerge.git automerge || {
@@ -132,6 +128,10 @@ runs:
             echo "automerge returned non-zero; check logs for conflicts" >&2
             exit 1
           }
+
+          # base sha = after automerge (all topics integrated), before the PR commits
+          base_sha=$(git rev-parse --verify HEAD)
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
 
           if [ -n "$PR" ]; then
             REMOTE="https://github.com/${TOPIC_REPO}.git"
