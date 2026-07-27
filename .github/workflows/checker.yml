@@ -29,6 +29,12 @@ jobs:
           image: ${{ vars.TECH_TEAM_NAMESPACE }}/kmake-image:${{ vars.KMAKE_IMAGE_VERSION }}
           registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
+      - name: Tag docker image
+        run: |
+          docker tag \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ vars.TECH_TEAM_NAMESPACE }}/kmake-image:${{ vars.KMAKE_IMAGE_VERSION }} \
+            kmake-image:latest
+
       - name: Checkout code
         id: sync
         uses: qualcomm-linux/kernel-checkers/.github/actions/sync@main
